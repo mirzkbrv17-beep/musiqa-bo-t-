@@ -1,43 +1,36 @@
-# Musiqa Bot — o‘rnatish qo‘llanmasi
+# Musiqa Bot — o‘rnatish
 
-## Nimalar bor?
-- Qo‘shiq nomi yozilsa, Jamendo katalogidan 10 ta natija chiqaradi.
-- Natija tanlanganda, provayder yuklab olishga ruxsat bergan trekni MP3 qilib yuboradi; aks holda havola beradi.
-- Ovozli xabarda aytilgan qo‘shiq nomini `OPENAI_API_KEY` orqali matnga aylantirib qidiradi.
-- Video/audio faylni `AUDD_TOKEN` orqali tanishga urinadi va aniqlangan nom bo‘yicha 10 ta trek qidiradi.
-- Botda so‘nggi 30 kunda faol bo‘lgan foydalanuvchilar soni ko‘rsatiladi. Bu haqiqiy hisob, sun’iy raqam emas.
+## Nimalar qiladi?
+- Qo‘shiq nomi bo‘yicha Internet Archive ochiq audio katalogidan 10 tagacha variant qidiradi.
+- Tanlangan material aniq Public Domain yoki Creative Commons litsenziyasiga ega bo‘lsa va audio fayli mavjud bo‘lsa, uni Telegramga yuboradi.
+- Ovozli xabarda aytilgan nomni matnga aylantirish uchun `OPENAI_API_KEY` ishlatadi.
+- Video/audio ichidagi musiqani tanish uchun `AUDD_TOKEN` ishlatadi.
+- So‘nggi 30 kun ichida faol foydalanuvchilar sonini hisoblaydi.
 
-## Muhim
-Bot mualliflik huquqini chetlab o‘tib tijoriy qo‘shiqlarni ruxsatsiz yuklab bermaydi. Yuklab olish faqat katalog ruxsat bergan treklar uchun ishlaydi. AudD va OpenAI kabi xizmatlar uchun alohida API kalitlari va tariflari bo‘lishi mumkin.
+## API kalitlari
+Musiqa qidirish uchun Jamendo Client ID kerak emas. Botni boshlang‘ich holatda ishlatish uchun faqat `BOT_TOKEN` kerak. Ovoz va video funksiyalari uchun `OPENAI_API_KEY` va `AUDD_TOKEN` ixtiyoriy, ammo zarur bo‘lishi mumkin.
 
-## 1. Kerakli akkauntlar
-1. Telegram’da `@BotFather` ga yozib `/newbot` qiling va token oling.
-2. Jamendo Developer portalidan Client ID oling: https://developer.jamendo.com/
-3. Video/audio orqali tanish uchun AudD token oling: https://audd.io/
-4. Ovozli xabarda aytilgan so‘zni matnga aylantirish uchun OpenAI API key oling: https://platform.openai.com/api-keys
+- Telegram tokeni: Telegramdagi @BotFather
+- AudD: https://audd.io/
+- OpenAI API key: https://platform.openai.com/api-keys
 
-## 2. Hostingga joylash
+## Hosting
 Python 3.11 yoki 3.12 tavsiya qilinadi.
 
 ```bash
 pip install -r requirements.txt
-```
-
-`.env.example` faylini `.env` deb nusxalab, kalitlarni kiriting. Hosting panelida environment variables qo‘llansa, kalitlarni o‘sha yerga kiriting. Kod `.env` faylini avtomatik o‘qimaydi; kalitlarni hosting environment variables bo‘limida kiriting.
-
-Linux serverda misol:
-```bash
-export BOT_TOKEN="Telegram token"
-export JAMENDO_CLIENT_ID="Jamendo Client ID"
-export AUDD_TOKEN="AudD token"
-export OPENAI_API_KEY="OpenAI API key"
 python bot.py
 ```
 
-Hostingda `python bot.py` doimiy ishlaydigan worker/process sifatida ishga tushsin. SQLite bazasi (`music_bot.db`) saqlanib qolishi kerak; ephemeral diskli hostingda persistent disk ulang.
+Hosting panelining Environment Variables bo‘limiga `BOT_TOKEN` kiriting. Ovoz/video funksiyalari kerak bo‘lsa, `AUDD_TOKEN` va `OPENAI_API_KEY` ni ham qo‘shing. `music_bot.db` bazasi saqlanib qoladigan diskdan foydalaning.
 
-## 3. Cheklovlar
-- Jamendo katalogida har qanday mashhur qo‘shiq bo‘lmasligi mumkin.
-- AudD musiqani ishonchli aniqlashi uchun videoda musiqa eshitilishi kerak; juda uzun fayllar yoki katta fayllar hosting/API limitlariga bog‘liq.
-- Telegram bot profilining yuqorisida Telegram ilovasidagi umumiy bot sahifasiga o‘zingiz xohlagan “11 200 oylik foydalanuvchi” yozuvini doimiy joylashtirib bo‘lmaydi. Kod `/start` va javoblarda haqiqiy so‘nggi 30 kunlik faol foydalanuvchilar sonini ko‘rsatadi.
-- Birinchi marta ishga tushirishdan oldin API kalitlarini tekshiring. Kalitlarni hech kimga yubormang.
+## Muhim cheklovlar
+- Bu versiya Jamendo Client ID talab qilmaydi; Internet Archive ochiq audio katalogidan qidiradi.
+- Internet Archive’da barcha mashhur tijoriy qo‘shiqlar bo‘lmaydi. Bot faqat ochiq litsenziyasi aniqlangan va mos audio fayli bor materiallarni yuborishga urinadi.
+- Video tanish va ovozni matnga aylantirish tashqi xizmatlar orqali amalga oshadi; ular API kaliti, internet va xizmat tarifini talab qilishi mumkin.
+- Bot profilining o‘zida Telegram ko‘rsatadigan oylik foydalanuvchilar yozuvini boshqarib bo‘lmaydi. Bot javoblarida haqiqiy oxirgi 30 kunlik faol foydalanuvchilar soni ko‘rsatiladi.
+
+## Kutubxonalarni avtomatik o‘rnatish
+- Windows kompyuterda `start.bat` faylini ishga tushiring. U `requirements.txt` ichidagi kutubxonalarni o‘rnatib, botni ochadi.
+- Linux hostingda Build Command: `pip install -r requirements.txt`; Start Command: `python bot.py`.
+- `BOT_TOKEN` ni hostingning Environment Variables bo‘limiga kiriting.

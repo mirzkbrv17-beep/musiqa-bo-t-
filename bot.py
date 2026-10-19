@@ -3,6 +3,7 @@ import sqlite3
 import tempfile
 import logging
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -12,8 +13,8 @@ from telegram.ext import (
 )
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-JAMENDO_CLIENT_ID = os.getenv("JAMENDO_CLIENT_ID", "").strip()
 AUDD_TOKEN = os.getenv("AUDD_TOKEN", "").strip()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 DB_PATH = os.getenv("DB_PATH", "music_bot.db")
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "25"))
 
@@ -22,6 +23,7 @@ logging.basicConfig(
     level=logging.INFO,
 )
 log = logging.getLogger("music-bot")
+HEADERS = {"User-Agent": "MusiqaTelegramBot/1.0 (personal project)"}
 
 def db():
     con = sqlite3.connect(DB_PATH)
@@ -49,52 +51,95 @@ def monthly_users() -> int:
     return int(row[0] or 0)
 
 def header() -> str:
-    # This is an actual rolling 30-day active-user count, not a fabricated number.
-    return f"🎵 Musiqa Bot  •  {monthly_users():,} oylik foydalanuvchi"
+    return f"🎵 Musiqa Bot • {monthly_users():,} oylik foydalanuvchi"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     touch_user(update.effective_user.id)
-    msg = (
+    await update.message.reply_text(
         f"{header()}\n\n"
-        "Musiqa nomini yozing — 10 ta mos variant topaman.\n"
+        "Musiqa nomini yozing — 10 tagacha bepul/litsenziyali audio variant qidiraman.\n"
         "🎙 Ovozli xabarda qo‘shiq nomini ayting.\n"
-        "🎬 Video/audio yuboring — qo‘shiqni aniqlashga urinaman.\n\n"
-        "Tanlangan trek Jamendo’da bepul va litsenziya asosida yuklab olishga ruxsat berilgan bo‘lsa, bot fayl qilib yuboradi. "
-        "Boshqa qo‘shiqlar uchun rasmiy havolalarni ko‘rsatadi."
+        "🎬 Video/audio yuboring — musiqa nomini aniqlashga urinaman.\n\n"
+        "Eslatma: bu katalogda barcha mashhur tijoriy qo‘shiqlar bo‘lmasligi mumkin."
     )
-    await update.message.reply_text(msg)
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     touch_user(update.effective_user.id)
     await update.message.reply_text(
         "Foydalanish:\n"
         "• Qo‘shiq nomini yozing\n"
-        "• Ovozli xabarda nomini ayting\n"
-        "• Musiqa eshitiladigan video/audio yuboring\n"
+        "• Ovozli xabarda nomini ayting (OPENAI_API_KEY kerak)\n"
+        "• Musiqa eshitiladigan video/audio yuboring (AUDD_TOKEN kerak)\n"
         "• Natijadagi tugmani tanlang\n\n"
-        "Eslatma: video/audio tanish uchun AUDD_TOKEN, musiqa qidirish/yuklash uchun "
-        "JAMENDO_CLIENT_ID kerak bo‘ladi."
+        "Qidiruv Internet Archive’dagi ochiq audio materiallardan foydalanadi."
     )
 
-def jamendo_search(query: str):
-    if not JAMENDO_CLIENT_ID:
-        return []
-    url = "https://api.jamendo.com/v3.0/tracks/"
+def archive_search(query: str):
+    """Search Internet Archive's open audio collection. No API key required."""
     params = {
-        "client_id": JAMENDO_CLIENT_ID,
-        "format": "json",
-        "limit": 10,
-        "search": query,
-        "include": "musicinfo",
-        "audioformat": "mp32",
+        "q": f'collection:opensource_audio AND mediatype:audio AND "{query}"',
+        "fl[]": ["identifier", "title", "creator", "licenseurl"],
+        "rows": 10,
+        "page": 1,
+        "output": "json",
     }
     try:
-        r = requests.get(url, params=params, timeout=20)
+        r = requests.get(
+            "https://archive.org/advancedsearch.php",
+            params=params, headers=HEADERS, timeout=25
+        )
         r.raise_for_status()
-        return r.json().get("results", [])
+        docs = r.json().get("response", {}).get("docs", [])
     except Exception:
-        log.exception("Jamendo search failed")
+        log.exception("Internet Archive search failed")
         return []
+    results = []
+    for doc in docs:
+        identifier = doc.get("identifier")
+        if not identifier:
+            continue
+        try:
+            meta_resp = requests.get(
+                f"https://archive.org/metadata/{quote(identifier, safe='')}",
+                headers=HEADERS, timeout=25
+            )
+            meta_resp.raise_for_status()
+            metadata = meta_resp.json()
+        except Exception:
+            log.exception("Could not fetch archive metadata for %s", identifier)
+            continue
+
+        meta = metadata.get("metadata", {})
+        license_url = str(meta.get("licenseurl") or doc.get("licenseurl") or "").lower()
+        # Only use items that explicitly state a public-domain or Creative Commons license.
+        allowed = ("creativecommons.org/publicdomain", "creativecommons.org/licenses/by/",
+                   "creativecommons.org/licenses/by-sa/", "creativecommons.org/licenses/by-nd/",
+                   "creativecommons.org/licenses/by-nc/", "creativecommons.org/licenses/by-nc-sa/",
+                   "creativecommons.org/licenses/by-nc-nd/")
+        if not any(x in license_url for x in allowed):
+            continue
+        files = metadata.get("files", [])
+        audio_file = next((f for f in files if str(f.get("name","")).lower().endswith(".mp3")
+                           and f.get("source") != "metadata"
+                           and not f.get("private")), None)
+        if not audio_file:
+            audio_file = next((f for f in files if str(f.get("name","")).lower().endswith((".ogg", ".wav", ".m4a"))
+                               and f.get("source") != "metadata" and not f.get("private")), None)
+        if not audio_file:
+            continue
+        results.append({
+            "name": str(meta.get("title") or doc.get("title") or identifier),
+            "artist_name": str(meta.get("creator") or doc.get("creator") or "Noma’lum ijrochi"),
+            "identifier": identifier,
+            "filename": audio_file["name"],
+            "size": int(audio_file.get("size") or 0),
+            "license": license_url,
+            "url": f"https://archive.org/download/{quote(identifier, safe='')}/{quote(audio_file['name'], safe='/')}",
+            "page": f"https://archive.org/details/{quote(identifier, safe='')}",
+        })
+        if len(results) >= 10:
+            break
+    return results
 
 def audd_identify(path: str):
     if not AUDD_TOKEN:
@@ -124,28 +169,26 @@ def audd_identify(path: str):
 def results_keyboard(tracks):
     rows = []
     for i, track in enumerate(tracks):
-        title = track.get("name", "Noma’lum trek")
-        artist = track.get("artist_name", "Noma’lum ijrochi")
-        label = f"{i+1}. {title} — {artist}"
+        label = f"{i+1}. {track.get('name','Noma’lum trek')} — {track.get('artist_name','Noma’lum ijrochi')}"
         if len(label) > 60:
             label = label[:57] + "..."
         rows.append([InlineKeyboardButton(label, callback_data=f"track:{i}")])
     return InlineKeyboardMarkup(rows)
 
 async def show_search(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str):
-    tracks = jamendo_search(query)
+    tracks = archive_search(query)
     if not tracks:
         await update.effective_message.reply_text(
             f"{header()}\n\n"
-            "Hozircha mos trek topilmadi yoki qidiruv API sozlanmagan. "
-            "Bot egasi JAMENDO_CLIENT_ID ni sozlaganini tekshirsin."
+            "Ochiq litsenziyali audio topilmadi. Boshqa nom bilan qidiring. "
+            "Bu katalogda barcha mashhur qo‘shiqlar mavjud emas."
         )
         return
     context.user_data["tracks"] = tracks
-    lines = [header(), f"\n🔎 “{query}” uchun topilgan 10 ta variant:"]
+    lines = [header(), f"\n🔎 “{query}” uchun topilgan variantlar:"]
     for i, t in enumerate(tracks, 1):
-        lines.append(f"{i}. {t.get('name','Noma’lum')} — {t.get('artist_name','Noma’lum ijrochi')}")
-    lines.append("\nYuklab olish yoki havolani ko‘rish uchun variantni tanlang:")
+        lines.append(f"{i}. {t['name']} — {t['artist_name']}")
+    lines.append("\nYuklab olish uchun variantni tanlang:")
     await update.effective_message.reply_text("\n".join(lines), reply_markup=results_keyboard(tracks))
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -154,35 +197,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query:
         await show_search(update, context, query)
 
-async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    touch_user(update.effective_user.id)
-    await update.message.reply_text(
-        f"{header()}\n\nOvozli xabarni tekshiryapman…"
-    )
-    # Telegram voice files are usually OGG/Opus. AUDD can identify audio, but
-    # speech-to-text of a spoken song title is a separate service; this starter
-    # uses optional OpenAI transcription when OPENAI_API_KEY is set.
-    file_obj = await context.bot.get_file(update.message.voice.file_id)
-    with tempfile.TemporaryDirectory() as td:
-        path = os.path.join(td, "voice.ogg")
-        await file_obj.download_to_drive(path)
-        query = await transcribe_audio(path)
-    if query:
-        await show_search(update, context, query)
-    else:
-        await update.message.reply_text(
-            "Ovozli xabardan nomni aniqlay olmadim. OPENAI_API_KEY sozlang yoki qo‘shiq nomini matn qilib yuboring."
-        )
-
 async def transcribe_audio(path: str):
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    if not api_key:
+    if not OPENAI_API_KEY:
         return None
     try:
         with open(path, "rb") as f:
             r = requests.post(
                 "https://api.openai.com/v1/audio/transcriptions",
-                headers={"Authorization": f"Bearer {api_key}"},
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
                 data={"model": "gpt-4o-mini-transcribe"},
                 files={"file": ("voice.ogg", f, "audio/ogg")},
                 timeout=90,
@@ -193,6 +215,21 @@ async def transcribe_audio(path: str):
         log.exception("Transcription failed")
         return None
 
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    touch_user(update.effective_user.id)
+    await update.message.reply_text(f"{header()}\n\nOvozli xabarni tekshiryapman…")
+    file_obj = await context.bot.get_file(update.message.voice.file_id)
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "voice.ogg")
+        await file_obj.download_to_drive(path)
+        query = await transcribe_audio(path)
+    if query:
+        await show_search(update, context, query)
+    else:
+        await update.message.reply_text(
+            "Ovozli xabardan nomni matnga aylantira olmadim. OPENAI_API_KEY sozlang yoki nomini matn qilib yuboring."
+        )
+
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     touch_user(update.effective_user.id)
     msg = update.message
@@ -201,7 +238,9 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     mime = getattr(media, "mime_type", None) or ""
     filename = getattr(media, "file_name", "") or ""
-    if msg.document and not (mime.startswith("video/") or mime.startswith("audio/") or filename.lower().endswith((".mp4", ".mov", ".m4a", ".mp3", ".wav", ".ogg", ".webm"))):
+    if msg.document and not (mime.startswith(("video/", "audio/")) or filename.lower().endswith(
+        (".mp4", ".mov", ".m4a", ".mp3", ".wav", ".ogg", ".webm")
+    )):
         await msg.reply_text("Iltimos, video yoki audio fayl yuboring.")
         return
     size = getattr(media, "file_size", 0) or 0
@@ -209,7 +248,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(f"Fayl juda katta. {MAX_UPLOAD_MB} MB gacha yuboring.")
         return
     if not AUDD_TOKEN:
-        await msg.reply_text("Musiqani videodan aniqlash uchun bot egasi AUDD_TOKEN sozlashi kerak.")
+        await msg.reply_text("Videodagi musiqani aniqlash uchun AUDD_TOKEN kerak. Hozircha qo‘shiq nomini matn qilib yuborishingiz mumkin.")
         return
     await msg.reply_text(f"{header()}\n\nVideodagi musiqani aniqlayapman…")
     file_obj = await context.bot.get_file(media.file_id)
@@ -219,18 +258,14 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await file_obj.download_to_drive(path)
         found = audd_identify(path)
     if not found or not found.get("title"):
-        await msg.reply_text("Musiqani aniqlay olmadim. Tiniqroq, musiqasi balandroq bo‘lgan qismini yuborib ko‘ring.")
+        await msg.reply_text("Musiqani aniqlay olmadim. Tiniqroq audio bilan qayta urinib ko‘ring.")
         return
     query = " ".join(x for x in [found.get("title"), found.get("artist")] if x).strip()
-    links = []
-    if found.get("spotify"):
-        links.append(f"Spotify: {found['spotify']}")
-    if found.get("apple"):
-        links.append(f"Apple Music: {found['apple']}")
+    links = [x for x in [found.get("spotify"), found.get("apple")] if x]
     await msg.reply_text(
         f"🎧 Aniqlangan musiqa: {query}\n" +
-        ("\n".join(links) + "\n\n" if links else "\n\n") +
-        "Shu qo‘shiqqa o‘xshash 10 ta trekni qidiryapman…"
+        (("\n".join(links) + "\n\n") if links else "\n") +
+        "Ochiq litsenziyali audio variantlarini qidiryapman…"
     )
     await show_search(update, context, query)
 
@@ -240,45 +275,42 @@ async def choose_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     touch_user(query.from_user.id)
     try:
         index = int(query.data.split(":")[1])
-        tracks = context.user_data.get("tracks", [])
-        track = tracks[index]
+        track = context.user_data.get("tracks", [])[index]
     except (ValueError, IndexError, TypeError):
         await query.edit_message_text("Bu natija eskirgan. Qo‘shiq nomini qayta yuboring.")
         return
 
-    name = track.get("name", "Noma’lum trek")
-    artist = track.get("artist_name", "Noma’lum ijrochi")
-    audio_url = track.get("audio")
-    download_allowed = str(track.get("audiodownload_allowed", "false")).lower() == "true"
-    # Jamendo returns audio links for tracks offered under its own licensing terms.
-    # Respect the provider's download permission field.
-    if audio_url and download_allowed:
-        try:
-            await query.message.reply_text(f"⬇️ {name} — {artist}\nFayl tayyorlanmoqda…")
-            r = requests.get(audio_url, timeout=45, stream=True)
+    url = track.get("url")
+    if not url:
+        await query.message.reply_text("Audio havolasi topilmadi.")
+        return
+    size = track.get("size", 0)
+    if size and size > 48 * 1024 * 1024:
+        await query.message.reply_text(f"Fayl Telegram orqali yuborish uchun katta. Tinglash/yuklab olish: {track['page']}")
+        return
+    await query.message.reply_text(f"⬇️ {track['name']} — {track['artist_name']}\nFaylni tayyorlayapman…")
+    temp_path = None
+    try:
+        with requests.get(url, headers=HEADERS, timeout=60, stream=True) as r:
             r.raise_for_status()
-            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+            with tempfile.NamedTemporaryFile(suffix=os.path.splitext(track["filename"])[1], delete=False) as f:
                 temp_path = f.name
-                for chunk in r.iter_content(chunk_size=1024 * 128):
+                for chunk in r.iter_content(chunk_size=128 * 1024):
                     if chunk:
                         f.write(chunk)
-            try:
-                with open(temp_path, "rb") as audio:
-                    await query.message.reply_audio(audio=audio, title=name, performer=artist)
-            finally:
-                os.unlink(temp_path)
-            return
-        except Exception:
-            log.exception("Track download failed")
-    links = []
-    for label, key in [("Jamendo", "shareurl"), ("Rasmiy audio", "audio")]:
-        if track.get(key):
-            links.append(f"{label}: {track[key]}")
-    await query.message.reply_text(
-        f"🎵 {name} — {artist}\n"
-        "Bu trek uchun bot orqali yuklab olish ruxsati mavjud emas. "
-        "Quyidagi havola orqali tinglashingiz mumkin:\n" + ("\n".join(links) if links else "Jamendo’da qidirib ko‘ring.")
-    )
+        with open(temp_path, "rb") as audio:
+            await query.message.reply_audio(
+                audio=audio,
+                title=track["name"][:64],
+                performer=track["artist_name"][:64],
+                caption=f"📄 Litsenziya: {track.get('license') or 'Manba sahifasida tekshiring'}\n{track['page']}",
+            )
+    except Exception:
+        log.exception("Audio download/send failed")
+        await query.message.reply_text(f"Faylni yuborib bo‘lmadi. Manbadan oching: {track['page']}")
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
 
 async def post_init(app: Application):
     if not BOT_TOKEN:
@@ -286,7 +318,7 @@ async def post_init(app: Application):
 
 def main():
     if not BOT_TOKEN:
-        raise SystemExit("BOT_TOKEN ni environment variable sifatida kiriting.")
+        raise SystemExit("BOT_TOKEN ni hosting Environment Variables bo‘limiga kiriting.")
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
